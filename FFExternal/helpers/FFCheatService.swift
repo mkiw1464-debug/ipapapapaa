@@ -91,27 +91,6 @@ enum FFFeature: String, CaseIterable {
 // MARK: - GitHub Manifest
 
 enum FFCheatManifest {
-    // "https://api.github.com/repos/mkiw1464-debug/all/contents"
-    private static let _apiBase: [UInt8] = [
-        0x32, 0x2e, 0x2e, 0x2a, 0x29, 0x60, 0x75, 0x75, 0x3b, 0x2a, 0x33,
-        0x74, 0x3d, 0x33, 0x2e, 0x32, 0x2f, 0x38, 0x74, 0x39, 0x35, 0x37,
-        0x75, 0x28, 0x3f, 0x2a, 0x35, 0x29, 0x75, 0x37, 0x31, 0x33, 0x2d,
-        0x6b, 0x6e, 0x6c, 0x6e, 0x77, 0x3e, 0x3f, 0x38, 0x2f, 0x3d, 0x75,
-        0x3b, 0x36, 0x36, 0x75, 0x39, 0x35, 0x34, 0x2e, 0x3f, 0x34, 0x2e,
-        0x29
-    ]
-
-    // "https://api.github.com/repos/mkiw1464-debug/all/git/trees/main?recursive=1"
-    private static let _treesAPI: [UInt8] = [
-        0x32, 0x2e, 0x2e, 0x2a, 0x29, 0x60, 0x75, 0x75, 0x3b, 0x2a, 0x33,
-        0x74, 0x3d, 0x33, 0x2e, 0x32, 0x2f, 0x38, 0x74, 0x39, 0x35, 0x37,
-        0x75, 0x28, 0x3f, 0x2a, 0x35, 0x29, 0x75, 0x37, 0x31, 0x33, 0x2d,
-        0x6b, 0x6e, 0x6c, 0x6e, 0x77, 0x3e, 0x3f, 0x38, 0x2f, 0x3d, 0x75,
-        0x3b, 0x36, 0x36, 0x75, 0x3d, 0x33, 0x2e, 0x75, 0x2e, 0x28, 0x3f,
-        0x3f, 0x29, 0x75, 0x37, 0x3b, 0x33, 0x34, 0x65, 0x28, 0x3f, 0x39,
-        0x2f, 0x28, 0x29, 0x33, 0x2c, 0x3f, 0x67, 0x6b
-    ]
-
     // "https://raw.githubusercontent.com/mkiw1464-debug/all/main"
     private static let _rawBase: [UInt8] = [
         0x32, 0x2e, 0x2e, 0x2a, 0x29, 0x60, 0x75, 0x75, 0x28, 0x3b, 0x2d,
@@ -127,99 +106,68 @@ enum FFCheatManifest {
         0x29, 0x2e, 0x3b, 0x2e, 0x2f, 0x29, 0x74, 0x30, 0x29, 0x35, 0x34
     ]
 
-    static var apiBase:    String { _X.d(_apiBase) }
     static var rawBase:    String { _X.d(_rawBase) }
     static var statusFile: String { _X.d(_statusFile) }
-    static var treesAPI:   String { _X.d(_treesAPI) }
 
     // MARK: - Repo path builders
 
-    // Aim: AIM/{folderName}/   (same file for FF and FFMAX)
-    // Holo: Holo/FF/  atau  Holo/FFMAX/
     static func repoPath(feature: FFFeature, game: FFGame) -> String {
         switch feature {
         case .aimBody, .aimNeck, .aimChest, .aimDrag, .magicBullet:
             return "AIM/\(feature.folderName)"
         case .hologram:
-            let sub = game == .freeFire ? "FF" : "FFMAX"
-            return "Holo/\(sub)"
+            return game == .freeFire ? "Holo/FF" : "Holo/FFMAX"
         }
     }
 
-    // MARK: - In-session file name cache
+    // MARK: - Status JSON
+    // status.json menyimpan nama file semasa OB — update bila OB tukar nama file.
 
-    private static var _nameCache: [String: String] = [:]
+    static var statusURL: URL? { URL(string: "\(rawBase)/\(statusFile)") }
+
+    // Status cached dalam session
+    private static var _statusCache: CheatStatus? = nil
     private static let _lock = NSLock()
 
-    private static func cacheKey(feature: FFFeature, game: FFGame) -> String {
-        "\(feature.rawValue)_\(game.rawValue)"
-    }
-
-    // MARK: - Auto-detect filename (Git Trees API)
-    // Guna Trees API bukan Contents API — Contents API 403 pada file > 1MB.
-    // Trees API return semua path dalam repo tanpa size limit.
-
-    private static var _treeCache: [String]? = nil   // semua blob paths dari repo
-
-    private static func fetchTree() async throws -> [String] {
-        _lock.lock()
-        if let cached = _treeCache {
-            _lock.unlock()
-            return cached
-        }
-        _lock.unlock()
-
-        guard let url = URL(string: treesAPI) else { throw FFCheatError.fileUnavailable }
+    static func fetchStatus() async throws -> CheatStatus {
+        guard let url = statusURL else { throw FFCheatError.fileUnavailable }
         var req = URLRequest(url: url)
-        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        req.timeoutInterval = 15
-
-        let (data, response) = try await URLSession.shared.data(for: req)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-            throw FFCheatError.fileUnavailable
-        }
-
-        struct GHTree:  Decodable { let tree: [GHNode] }
-        struct GHNode:  Decodable { let path: String; let type: String }
-        let tree = try JSONDecoder().decode(GHTree.self, from: data)
-        let paths = tree.tree.filter { $0.type == "blob" }.map { $0.path }
-
+        req.timeoutInterval = 10
+        // Cache-bust: pastikan dapat versi terkini
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        let (data, _) = try await URLSession.shared.data(for: req)
+        let status = try JSONDecoder().decode(CheatStatus.self, from: data)
         _lock.lock()
-        _treeCache = paths
+        _statusCache = status
         _lock.unlock()
-
-        return paths
+        return status
     }
+
+    static func cachedStatus() -> CheatStatus? {
+        _lock.lock()
+        defer { _lock.unlock() }
+        return _statusCache
+    }
+
+    // MARK: - Resolve filename dari status.json
 
     static func resolveFileName(feature: FFFeature, game: FFGame) async throws -> String {
-        let key = cacheKey(feature: feature, game: game)
-
-        _lock.lock()
-        if let cached = _nameCache[key] {
-            _lock.unlock()
-            return cached
+        // Ambil status — cached kalau ada
+        let status: CheatStatus
+        if let cached = cachedStatus() {
+            status = cached
+        } else {
+            status = try await fetchStatus()
         }
-        _lock.unlock()
-
-        let paths  = try await fetchTree()
-        let folder = repoPath(feature: feature, game: game)   // e.g. "AIM/AimBody"
-        let prefix = feature.filePrefix                        // "cache_res" or "shaders"
-
-        // Cari path yang dalam folder betul DAN nama fail bermula dengan prefix
-        guard let match = paths.first(where: { path in
-            path.hasPrefix(folder + "/") &&
-            (path as NSString).lastPathComponent.hasPrefix(prefix)
-        }) else {
-            throw FFCheatError.targetFileMissing
+        switch feature {
+        case .aimBody, .aimNeck, .aimChest, .aimDrag, .magicBullet:
+            guard !status.cacheResName.isEmpty else { throw FFCheatError.targetFileMissing }
+            return status.cacheResName
+        case .hologram:
+            let name = game == .freeFire ? status.shadersFFName : status.shadersFFMAXName
+            guard !name.isEmpty else { throw FFCheatError.targetFileMissing }
+            return name
         }
-
-        let fileName = (match as NSString).lastPathComponent
-
-        _lock.lock()
-        _nameCache[key] = fileName
-        _lock.unlock()
-
-        return fileName
     }
 
     // MARK: - Download
@@ -239,7 +187,7 @@ enum FFCheatManifest {
         return (data, name)
     }
 
-    // MARK: - Availability check (HEAD only)
+    // MARK: - Availability check
 
     static func checkAvailability(feature: FFFeature, game: FFGame) async -> Bool {
         do {
@@ -253,39 +201,33 @@ enum FFCheatManifest {
             return (r as? HTTPURLResponse)?.statusCode == 200
         } catch { return false }
     }
-
-    // MARK: - Status JSON
-
-    static var statusURL: URL? { URL(string: "\(rawBase)/\(statusFile)") }
-
-    static func fetchStatus() async throws -> CheatStatus {
-        guard let url = statusURL else { throw FFCheatError.fileUnavailable }
-        var req = URLRequest(url: url)
-        req.timeoutInterval = 10
-        let (data, _) = try await URLSession.shared.data(for: req)
-        return try JSONDecoder().decode(CheatStatus.self, from: data)
-    }
 }
 
-// MARK: - Cheat Status Model (untuk status card di MENU tab)
+// MARK: - Cheat Status Model
 
 struct CheatStatus: Codable {
-    var status:      String   // "ONLINE" / "OFFLINE" / "MAINTENANCE"
-    var aimBody:     String
-    var aimNeck:     String
-    var aimChest:    String
-    var aimDrag:     String
-    var magicBullet: String
-    var hologram:    String
+    var status:          String   // "ONLINE" / "OFFLINE" / "MAINTENANCE"
+    var aimBody:         String
+    var aimNeck:         String
+    var aimChest:        String
+    var aimDrag:         String
+    var magicBullet:     String
+    var hologram:        String
+    var cacheResName:    String   // nama fail cache_res semasa OB
+    var shadersFFName:   String   // nama fail shaders FF
+    var shadersFFMAXName: String  // nama fail shaders FFMAX
 
     enum CodingKeys: String, CodingKey {
         case status
-        case aimBody     = "aimBody"
-        case aimNeck     = "aimNeck"
-        case aimChest    = "aimChest"
-        case aimDrag     = "aimDrag"
-        case magicBullet = "magicBullet"
-        case hologram    = "hologram"
+        case aimBody          = "aimBody"
+        case aimNeck          = "aimNeck"
+        case aimChest         = "aimChest"
+        case aimDrag          = "aimDrag"
+        case magicBullet      = "magicBullet"
+        case hologram         = "hologram"
+        case cacheResName     = "cacheResName"
+        case shadersFFName    = "shadersFFName"
+        case shadersFFMAXName = "shadersFFMAXName"
     }
 
     var isOperational: Bool { status.uppercased() == "ONLINE" }
@@ -302,10 +244,14 @@ struct CheatStatus: Codable {
     }
 
     static var placeholder: CheatStatus {
-        CheatStatus(status: "ONLINE", aimBody: "SAFE", aimNeck: "SAFE",
-                    aimChest: "SAFE", aimDrag: "SAFE", magicBullet: "SAFE", hologram: "SAFE")
+        CheatStatus(
+            status: "ONLINE", aimBody: "SAFE", aimNeck: "SAFE",
+            aimChest: "SAFE", aimDrag: "SAFE", magicBullet: "SAFE", hologram: "SAFE",
+            cacheResName: "", shadersFFName: "", shadersFFMAXName: ""
+        )
     }
 }
+
 
 // MARK: - Errors
 
