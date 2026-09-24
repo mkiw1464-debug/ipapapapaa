@@ -266,7 +266,7 @@ struct MainMenuView: View {
             rowSep
             statusRow(label: "AIMDRAG",      value: cheatStatus.aimDrag.uppercased(),     note: nil, statusColor: statusColor(cheatStatus.aimDrag))
             rowSep
-            statusRow(label: "MAGIC BULLET", value: cheatStatus.magicBullet.uppercased(), note: "don't hit behind wall", statusColor: statusColor(cheatStatus.magicBullet))
+            statusRow(label: "MAGIC BULLET", value: cheatStatus.magicBullet.uppercased(), note: nil, statusColor: statusColor(cheatStatus.magicBullet))
             rowSep
             statusRow(label: "HOLOGRAM",     value: cheatStatus.hologram.uppercased(),    note: nil, statusColor: statusColor(cheatStatus.hologram))
         }
