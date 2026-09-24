@@ -1,35 +1,56 @@
 import SwiftUI
 
 // MARK: - FF External Design System
-// Theme: iOS dark grey + white — clean, bold, no gimmicks
+// Adaptive light/dark — guna UIColor yang auto-respond ikut colorScheme sistem.
 
 enum FFTheme {
-    // MARK: Colors
-    // Background — deep iOS grouped grey (not pure black, not white)
-    static let background        = Color(red: 0.11, green: 0.11, blue: 0.12)
-    static let backgroundSecond  = Color(red: 0.16, green: 0.16, blue: 0.18)
-    static let card              = Color(red: 0.19, green: 0.19, blue: 0.21)
-    static let cardElevated      = Color(red: 0.23, green: 0.23, blue: 0.25)
+    // MARK: - Background
+    // Dark: hampir hitam | Light: grouped background iOS
+    static let background = Color(UIColor { t in
+        t.userInterfaceStyle == .dark
+            ? UIColor(red: 0.11, green: 0.11, blue: 0.12, alpha: 1)
+            : UIColor.systemGroupedBackground
+    })
 
-    static let glass             = Color.white.opacity(0.06)
-    static let glassBorder       = Color.white.opacity(0.10)
-    static let separator         = Color.white.opacity(0.08)
+    static let card = Color(UIColor { t in
+        t.userInterfaceStyle == .dark
+            ? UIColor(red: 0.19, green: 0.19, blue: 0.21, alpha: 1)
+            : UIColor.secondarySystemGroupedBackground
+    })
 
-    // Text
-    static let text              = Color.white
-    static let textSecondary     = Color(white: 0.55)
-    static let textTertiary      = Color(white: 0.38)
+    static let cardElevated = Color(UIColor { t in
+        t.userInterfaceStyle == .dark
+            ? UIColor(red: 0.23, green: 0.23, blue: 0.25, alpha: 1)
+            : UIColor.tertiarySystemGroupedBackground
+    })
 
-    // Accent — pure white for primary actions (iOS dark mode style)
-    static let accent            = Color.white
-    static let accentAlt         = Color(white: 0.75)
+    static let glassBorder = Color(UIColor { t in
+        t.userInterfaceStyle == .dark
+            ? UIColor.white.withAlphaComponent(0.10)
+            : UIColor.black.withAlphaComponent(0.08)
+    })
 
-    // Semantic
-    static let success           = Color(red: 0.18, green: 0.78, blue: 0.38)   // iOS green
-    static let danger            = Color(red: 0.95, green: 0.28, blue: 0.28)   // iOS red
-    static let warn              = Color(red: 0.95, green: 0.70, blue: 0.15)   // iOS yellow
+    static let separator = Color(UIColor { t in
+        t.userInterfaceStyle == .dark
+            ? UIColor.white.withAlphaComponent(0.08)
+            : UIColor.separator
+    })
 
-    // MARK: Typography
+    // MARK: - Text
+    static let text          = Color.primary
+    static let textSecondary = Color.secondary
+    static let textTertiary  = Color(UIColor.tertiaryLabel)
+
+    // MARK: - Accent
+    static let accent    = Color.primary
+    static let accentAlt = Color.secondary
+
+    // MARK: - Semantic
+    static let success = Color(red: 0.18, green: 0.78, blue: 0.38)
+    static let danger  = Color(red: 0.95, green: 0.28, blue: 0.28)
+    static let warn    = Color(red: 0.95, green: 0.70, blue: 0.15)
+
+    // MARK: - Typography (font sistem iPhone)
     static let titleFont    = Font.system(size: 30, weight: .bold,    design: .rounded)
     static let subtitleFont = Font.system(size: 14, weight: .regular, design: .rounded)
     static let bodyFont     = Font.system(size: 15, weight: .semibold, design: .rounded)
@@ -37,7 +58,7 @@ enum FFTheme {
     static let labelFont    = Font.system(size: 11, weight: .semibold, design: .rounded)
     static let monoFont     = Font.system(size: 13, weight: .medium,  design: .monospaced)
 
-    // MARK: Shape
+    // MARK: - Shape
     static let cornerRadius: CGFloat = 16
     static let cardPadding:  CGFloat = 16
 }
@@ -78,7 +99,6 @@ extension View {
         modifier(CardModifier(padding: padding, radius: radius, color: color))
     }
 
-    // Legacy alias kept so existing call sites compile
     func glassCard(padding: CGFloat = FFTheme.cardPadding,
                    cornerRadius: CGFloat = FFTheme.cornerRadius) -> some View {
         ffCard(padding: padding, radius: cornerRadius)
@@ -103,6 +123,8 @@ struct FFButton: View {
     var style: ButtonStyle = .primary
 
     enum ButtonStyle { case primary, secondary, danger }
+
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         Button(action: action) {
@@ -135,23 +157,25 @@ struct FFButton: View {
 
     private var bgColor: Color {
         switch style {
-        case .primary:   return Color.white
+        case .primary:   return Color.primary
         case .secondary: return FFTheme.cardElevated
         case .danger:    return FFTheme.danger.opacity(0.15)
         }
     }
+
     private var labelColor: Color {
         switch style {
-        case .primary:   return Color(red: 0.08, green: 0.08, blue: 0.09)
+        case .primary:   return colorScheme == .dark ? .black : .white
         case .secondary: return FFTheme.text
         case .danger:    return FFTheme.danger
         }
     }
+
     private var borderColor: Color {
         switch style {
         case .primary:   return Color.clear
         case .secondary: return FFTheme.glassBorder
-        case .danger:    return FFTheme.danger.opacity(0.4)
+        case .danger:    return FFTheme.danger.opacity(0.30)
         }
     }
 }
