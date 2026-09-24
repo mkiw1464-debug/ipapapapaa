@@ -16,8 +16,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Select Xcode 16
+      - name: Select Xcode 16 + verify iOS SDK
         run: |
+          # Pilih Xcode 16.x
           XCODE_PATH=""
           for ver in Xcode_16.3 Xcode_16.2 Xcode_16.1 Xcode_16; do
             if [ -d "/Applications/${ver}.app" ]; then
@@ -26,12 +27,26 @@ jobs:
             fi
           done
           if [ -z "$XCODE_PATH" ]; then
-            echo "No Xcode 16.x found, using default"
             XCODE_PATH=$(xcode-select -p | sed 's|/Contents/Developer||')
           fi
           echo "Using: $XCODE_PATH"
           sudo xcode-select -s "${XCODE_PATH}/Contents/Developer"
           xcodebuild -version
+
+          # List SDK yang tersedia
+          echo "=== Available SDKs ==="
+          xcodebuild -showsdks 2>&1 | grep -i iphone || true
+
+          # Semak iOS SDK path terus dalam Xcode bundle
+          IOS_SDK_PATH=$(find "${XCODE_PATH}/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs" -name "iPhoneOS*.sdk" -maxdepth 1 | sort | tail -1)
+          echo "iOS SDK path: $IOS_SDK_PATH"
+
+          if [ -z "$IOS_SDK_PATH" ]; then
+            echo "iOS SDK not found in Xcode bundle, downloading..."
+            xcodebuild -downloadPlatform iOS 2>&1 | tail -20 || true
+          else
+            echo "iOS SDK found: $IOS_SDK_PATH"
+          fi
 
       - name: Verify repo structure
         run: |
@@ -41,8 +56,6 @@ jobs:
           find "$GITHUB_WORKSPACE" -name "*.xcodeproj" -maxdepth 4
           echo "=== Swift files ==="
           find "$GITHUB_WORKSPACE" -name "*.swift" -maxdepth 6 | head -30
-          echo "=== Bridging header ==="
-          find "$GITHUB_WORKSPACE" -name "*Bridging*" -maxdepth 6
 
       - name: Resolve project path
         id: paths
@@ -56,7 +69,6 @@ jobs:
           echo "PROJ=$PROJ"         >> $GITHUB_OUTPUT
           echo "PROJ_DIR=$PROJ_DIR" >> $GITHUB_OUTPUT
           echo "Project: $PROJ"
-          echo "Dir: $PROJ_DIR"
           ls -la "$PROJ_DIR"
 
       - name: List available schemes
@@ -68,43 +80,26 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Try GitHub API — GITHUB_TOKEN header prevents rate-limit issues
           SSVER=$(curl -sf \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             "https://api.github.com/repos/rockbruno/swiftshield/releases/latest" \
             | grep '"tag_name"' | cut -d'"' -f4)
-
-          # Fallback: hardcode last known stable version if API returns empty
-          if [ -z "$SSVER" ]; then
-            SSVER="3.14.3"
-            echo "GitHub API returned empty — using fallback version $SSVER"
-          fi
-
+          if [ -z "$SSVER" ]; then SSVER="3.14.3"; fi
           echo "Installing SwiftShield $SSVER"
           DOWNLOAD_URL="https://github.com/rockbruno/swiftshield/releases/download/${SSVER}/swiftshield.zip"
-
-          # Download with retry
           for attempt in 1 2 3; do
             curl -fL "$DOWNLOAD_URL" -o /tmp/ss.zip && break
-            echo "Download attempt $attempt failed, retrying in 3s..."
             sleep 3
           done
-
-          # Sanity check — abort early if not a valid zip
           if ! file /tmp/ss.zip | grep -qi "zip"; then
-            echo "ERROR: Downloaded file is not a valid zip archive"
-            file /tmp/ss.zip
-            xxd /tmp/ss.zip | head -3
+            echo "ERROR: not a valid zip"
             exit 1
           fi
-
           unzip -o /tmp/ss.zip -d /tmp/swiftshield
-          # SwiftShield 4.x ships binary under bin/, not at root
           SS_BIN=$(find /tmp/swiftshield -name "swiftshield" -type f | grep -v dSYM | head -1)
           if [ -z "$SS_BIN" ]; then
-            echo "ERROR: swiftshield binary not found after extraction"
-            find /tmp/swiftshield -type f
+            echo "ERROR: swiftshield binary not found"
             exit 1
           fi
           chmod +x "$SS_BIN"
@@ -119,11 +114,9 @@ jobs:
             --output-path "$RUNNER_TEMP/obfuscated" \
             --ignore-files "App.swift,DesignSystem.swift" \
             2>&1 | tee /tmp/swiftshield.log || true
-          # If SwiftShield fails (e.g. project config), continue with unobfuscated source
           if [ -d "$RUNNER_TEMP/obfuscated" ]; then
             echo "SS_PROJ_DIR=$RUNNER_TEMP/obfuscated" >> $GITHUB_ENV
           else
-            echo "SwiftShield did not produce output — building from source"
             echo "SS_PROJ_DIR=${{ steps.paths.outputs.PROJ_DIR }}" >> $GITHUB_ENV
           fi
 
@@ -133,12 +126,28 @@ jobs:
           BUILD_DIR="${SS_PROJ_DIR:-${{ steps.paths.outputs.PROJ_DIR }}}"
           cd "$BUILD_DIR"
 
+          # Detect iOS SDK yang ada
+          IOS_SDK=$(xcodebuild -showsdks 2>/dev/null \
+            | grep "iphoneos" \
+            | awk '{print $NF}' \
+            | grep -o 'iphoneos[0-9.]*' \
+            | tail -1)
+          echo "Detected iOS SDK: ${IOS_SDK:-none}"
+
+          # Build flags
+          DEST="generic/platform=iOS"
+          SDK_FLAG=""
+          if [ -n "$IOS_SDK" ]; then
+            SDK_FLAG="-sdk $IOS_SDK"
+          fi
+
           xcodebuild archive \
             -project FFExternal.xcodeproj \
             -scheme FFExternal \
             -configuration Release \
             -archivePath "$RUNNER_TEMP/FFExternal.xcarchive" \
-            -destination "generic/platform=iOS" \
+            -destination "$DEST" \
+            $SDK_FLAG \
             ONLY_ACTIVE_ARCH=NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -159,37 +168,27 @@ jobs:
             2>&1 | tee /tmp/xcodebuild.log
 
           BUILD_EXIT=${PIPESTATUS[0]}
-          echo "Build exit: $BUILD_EXIT"
           if [ "$BUILD_EXIT" -ne 0 ]; then
-            echo "=== LAST 400 LINES OF BUILD LOG ==="
-            tail -400 /tmp/xcodebuild.log
+            echo "=== LAST 500 LINES ==="
+            tail -500 /tmp/xcodebuild.log
             exit $BUILD_EXIT
           fi
 
       - name: Show build log tail on failure
         if: failure()
-        run: |
-          echo "=== FULL BUILD LOG (last 500 lines) ==="
-          tail -500 /tmp/xcodebuild.log || true
+        run: tail -500 /tmp/xcodebuild.log || true
 
       - name: Package IPA
         run: |
           ARCHIVE="$RUNNER_TEMP/FFExternal.xcarchive"
-          echo "=== Archive structure ==="
-          find "$ARCHIVE" -maxdepth 5 | head -50
-
           APP_PATH=$(find "$ARCHIVE" -name "*.app" -maxdepth 6 | head -1)
-          echo "Found .app: $APP_PATH"
-
           if [ -z "$APP_PATH" ]; then
-            echo "ERROR: .app bundle not found in archive"
+            echo "ERROR: .app not found"
             exit 1
           fi
-
           IPA_STAGING="$RUNNER_TEMP/IPAStaging/Payload"
           mkdir -p "$IPA_STAGING"
           cp -R "$APP_PATH" "$IPA_STAGING/"
-
           cd "$RUNNER_TEMP/IPAStaging"
           zip -r "$RUNNER_TEMP/FFExternal.ipa" Payload/
           echo "IPA size: $(du -sh "$RUNNER_TEMP/FFExternal.ipa")"
