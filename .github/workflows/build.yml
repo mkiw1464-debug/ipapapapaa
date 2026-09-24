@@ -1,0 +1,203 @@
+name: Build FF External IPA
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 16
+        run: |
+          XCODE_PATH=""
+          for ver in Xcode_16.3 Xcode_16.2 Xcode_16.1 Xcode_16; do
+            if [ -d "/Applications/${ver}.app" ]; then
+              XCODE_PATH="/Applications/${ver}.app"
+              break
+            fi
+          done
+          if [ -z "$XCODE_PATH" ]; then
+            echo "No Xcode 16.x found, using default"
+            XCODE_PATH=$(xcode-select -p | sed 's|/Contents/Developer||')
+          fi
+          echo "Using: $XCODE_PATH"
+          sudo xcode-select -s "${XCODE_PATH}/Contents/Developer"
+          xcodebuild -version
+
+      - name: Verify repo structure
+        run: |
+          echo "=== GITHUB_WORKSPACE ==="
+          ls -la "$GITHUB_WORKSPACE"
+          echo "=== xcodeproj search ==="
+          find "$GITHUB_WORKSPACE" -name "*.xcodeproj" -maxdepth 4
+          echo "=== Swift files ==="
+          find "$GITHUB_WORKSPACE" -name "*.swift" -maxdepth 6 | head -30
+          echo "=== Bridging header ==="
+          find "$GITHUB_WORKSPACE" -name "*Bridging*" -maxdepth 6
+
+      - name: Resolve project path
+        id: paths
+        run: |
+          PROJ=$(find "$GITHUB_WORKSPACE" -name "FFExternal.xcodeproj" -maxdepth 4 | head -1)
+          if [ -z "$PROJ" ]; then
+            echo "ERROR: FFExternal.xcodeproj not found"
+            exit 1
+          fi
+          PROJ_DIR=$(dirname "$PROJ")
+          echo "PROJ=$PROJ"         >> $GITHUB_OUTPUT
+          echo "PROJ_DIR=$PROJ_DIR" >> $GITHUB_OUTPUT
+          echo "Project: $PROJ"
+          echo "Dir: $PROJ_DIR"
+          ls -la "$PROJ_DIR"
+
+      - name: List available schemes
+        run: |
+          cd "${{ steps.paths.outputs.PROJ_DIR }}"
+          xcodebuild -project FFExternal.xcodeproj -list 2>&1 || true
+
+      - name: Install SwiftShield
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Try GitHub API — GITHUB_TOKEN header prevents rate-limit issues
+          SSVER=$(curl -sf \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/rockbruno/swiftshield/releases/latest" \
+            | grep '"tag_name"' | cut -d'"' -f4)
+
+          # Fallback: hardcode last known stable version if API returns empty
+          if [ -z "$SSVER" ]; then
+            SSVER="3.14.3"
+            echo "GitHub API returned empty — using fallback version $SSVER"
+          fi
+
+          echo "Installing SwiftShield $SSVER"
+          DOWNLOAD_URL="https://github.com/rockbruno/swiftshield/releases/download/${SSVER}/swiftshield.zip"
+
+          # Download with retry
+          for attempt in 1 2 3; do
+            curl -fL "$DOWNLOAD_URL" -o /tmp/ss.zip && break
+            echo "Download attempt $attempt failed, retrying in 3s..."
+            sleep 3
+          done
+
+          # Sanity check — abort early if not a valid zip
+          if ! file /tmp/ss.zip | grep -qi "zip"; then
+            echo "ERROR: Downloaded file is not a valid zip archive"
+            file /tmp/ss.zip
+            xxd /tmp/ss.zip | head -3
+            exit 1
+          fi
+
+          unzip -o /tmp/ss.zip -d /tmp/swiftshield
+          # SwiftShield 4.x ships binary under bin/, not at root
+          SS_BIN=$(find /tmp/swiftshield -name "swiftshield" -type f | grep -v dSYM | head -1)
+          if [ -z "$SS_BIN" ]; then
+            echo "ERROR: swiftshield binary not found after extraction"
+            find /tmp/swiftshield -type f
+            exit 1
+          fi
+          chmod +x "$SS_BIN"
+          echo "$(dirname "$SS_BIN")" >> $GITHUB_PATH
+
+      - name: Obfuscate Swift symbols (SwiftShield)
+        run: |
+          cd "${{ steps.paths.outputs.PROJ_DIR }}"
+          swiftshield obfuscate \
+            --project-root . \
+            --scheme FFExternal \
+            --output-path "$RUNNER_TEMP/obfuscated" \
+            --ignore-files "App.swift,DesignSystem.swift" \
+            2>&1 | tee /tmp/swiftshield.log || true
+          # If SwiftShield fails (e.g. project config), continue with unobfuscated source
+          if [ -d "$RUNNER_TEMP/obfuscated" ]; then
+            echo "SS_PROJ_DIR=$RUNNER_TEMP/obfuscated" >> $GITHUB_ENV
+          else
+            echo "SwiftShield did not produce output — building from source"
+            echo "SS_PROJ_DIR=${{ steps.paths.outputs.PROJ_DIR }}" >> $GITHUB_ENV
+          fi
+
+      - name: Build (unsigned + hardened)
+        run: |
+          set -o pipefail
+          BUILD_DIR="${SS_PROJ_DIR:-${{ steps.paths.outputs.PROJ_DIR }}}"
+          cd "$BUILD_DIR"
+
+          xcodebuild archive \
+            -project FFExternal.xcodeproj \
+            -scheme FFExternal \
+            -configuration Release \
+            -archivePath "$RUNNER_TEMP/FFExternal.xcarchive" \
+            -destination "generic/platform=iOS" \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            ENABLE_BITCODE=NO \
+            DEBUG_INFORMATION_FORMAT=dwarf-with-dsym \
+            SWIFT_COMPILATION_MODE=wholemodule \
+            SWIFT_OPTIMIZATION_LEVEL=-Osize \
+            GCC_OPTIMIZATION_LEVEL=s \
+            ENABLE_TESTABILITY=NO \
+            DEAD_CODE_STRIPPING=YES \
+            STRIP_INSTALLED_PRODUCT=YES \
+            STRIP_STYLE=all \
+            COPY_PHASE_STRIP=YES \
+            GCC_SYMBOLS_PRIVATE_EXTERN=YES \
+            2>&1 | tee /tmp/xcodebuild.log
+
+          BUILD_EXIT=${PIPESTATUS[0]}
+          echo "Build exit: $BUILD_EXIT"
+          if [ "$BUILD_EXIT" -ne 0 ]; then
+            echo "=== LAST 400 LINES OF BUILD LOG ==="
+            tail -400 /tmp/xcodebuild.log
+            exit $BUILD_EXIT
+          fi
+
+      - name: Show build log tail on failure
+        if: failure()
+        run: |
+          echo "=== FULL BUILD LOG (last 500 lines) ==="
+          tail -500 /tmp/xcodebuild.log || true
+
+      - name: Package IPA
+        run: |
+          ARCHIVE="$RUNNER_TEMP/FFExternal.xcarchive"
+          echo "=== Archive structure ==="
+          find "$ARCHIVE" -maxdepth 5 | head -50
+
+          APP_PATH=$(find "$ARCHIVE" -name "*.app" -maxdepth 6 | head -1)
+          echo "Found .app: $APP_PATH"
+
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: .app bundle not found in archive"
+            exit 1
+          fi
+
+          IPA_STAGING="$RUNNER_TEMP/IPAStaging/Payload"
+          mkdir -p "$IPA_STAGING"
+          cp -R "$APP_PATH" "$IPA_STAGING/"
+
+          cd "$RUNNER_TEMP/IPAStaging"
+          zip -r "$RUNNER_TEMP/FFExternal.ipa" Payload/
+          echo "IPA size: $(du -sh "$RUNNER_TEMP/FFExternal.ipa")"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FFExternal-${{ github.run_number }}
+          path: ${{ runner.temp }}/FFExternal.ipa
+          retention-days: 30
+          if-no-files-found: error
