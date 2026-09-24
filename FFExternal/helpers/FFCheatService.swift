@@ -101,6 +101,17 @@ enum FFCheatManifest {
         0x29
     ]
 
+    // "https://api.github.com/repos/mkiw1464-debug/all/git/trees/main?recursive=1"
+    private static let _treesAPI: [UInt8] = [
+        0x32, 0x2e, 0x2e, 0x2a, 0x29, 0x60, 0x75, 0x75, 0x3b, 0x2a, 0x33,
+        0x74, 0x3d, 0x33, 0x2e, 0x32, 0x2f, 0x38, 0x74, 0x39, 0x35, 0x37,
+        0x75, 0x28, 0x3f, 0x2a, 0x35, 0x29, 0x75, 0x37, 0x31, 0x33, 0x2d,
+        0x6b, 0x6e, 0x6c, 0x6e, 0x77, 0x3e, 0x3f, 0x38, 0x2f, 0x3d, 0x75,
+        0x3b, 0x36, 0x36, 0x75, 0x3d, 0x33, 0x2e, 0x75, 0x2e, 0x28, 0x3f,
+        0x3f, 0x29, 0x75, 0x37, 0x3b, 0x33, 0x34, 0x65, 0x28, 0x3f, 0x39,
+        0x2f, 0x28, 0x29, 0x33, 0x2c, 0x3f, 0x67, 0x6b
+    ]
+
     // "https://raw.githubusercontent.com/mkiw1464-debug/all/main"
     private static let _rawBase: [UInt8] = [
         0x32, 0x2e, 0x2e, 0x2a, 0x29, 0x60, 0x75, 0x75, 0x28, 0x3b, 0x2d,
@@ -119,12 +130,13 @@ enum FFCheatManifest {
     static var apiBase:    String { _X.d(_apiBase) }
     static var rawBase:    String { _X.d(_rawBase) }
     static var statusFile: String { _X.d(_statusFile) }
+    static var treesAPI:   String { _X.d(_treesAPI) }
 
     // MARK: - Repo path builders
 
-    // Aim: /AIM/{folderName}/   (same file for FF and FFMAX)
-    // Holo: /Holo/FF/  atau  /Holo/FFMAX/
-    static func contentsAPIPath(feature: FFFeature, game: FFGame) -> String {
+    // Aim: AIM/{folderName}/   (same file for FF and FFMAX)
+    // Holo: Holo/FF/  atau  Holo/FFMAX/
+    static func repoPath(feature: FFFeature, game: FFGame) -> String {
         switch feature {
         case .aimBody, .aimNeck, .aimChest, .aimDrag, .magicBullet:
             return "AIM/\(feature.folderName)"
@@ -136,17 +148,49 @@ enum FFCheatManifest {
 
     // MARK: - In-session file name cache
 
-    private static var _nameCache: [String: String] = [:]   // cacheKey → resolved filename
+    private static var _nameCache: [String: String] = [:]
     private static let _lock = NSLock()
 
     private static func cacheKey(feature: FFFeature, game: FFGame) -> String {
         "\(feature.rawValue)_\(game.rawValue)"
     }
 
-    // MARK: - Auto-detect filename (GitHub Contents API)
+    // MARK: - Auto-detect filename (Git Trees API)
+    // Guna Trees API bukan Contents API — Contents API 403 pada file > 1MB.
+    // Trees API return semua path dalam repo tanpa size limit.
 
-    /// Panggil GitHub Contents API, cari file yang nama bermula dengan feature.filePrefix.
-    /// Cache result dalam session. Thread-safe via serial dispatch.
+    private static var _treeCache: [String]? = nil   // semua blob paths dari repo
+
+    private static func fetchTree() async throws -> [String] {
+        _lock.lock()
+        if let cached = _treeCache {
+            _lock.unlock()
+            return cached
+        }
+        _lock.unlock()
+
+        guard let url = URL(string: treesAPI) else { throw FFCheatError.fileUnavailable }
+        var req = URLRequest(url: url)
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        req.timeoutInterval = 15
+
+        let (data, response) = try await URLSession.shared.data(for: req)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            throw FFCheatError.fileUnavailable
+        }
+
+        struct GHTree:  Decodable { let tree: [GHNode] }
+        struct GHNode:  Decodable { let path: String; let type: String }
+        let tree = try JSONDecoder().decode(GHTree.self, from: data)
+        let paths = tree.tree.filter { $0.type == "blob" }.map { $0.path }
+
+        _lock.lock()
+        _treeCache = paths
+        _lock.unlock()
+
+        return paths
+    }
+
     static func resolveFileName(feature: FFFeature, game: FFGame) async throws -> String {
         let key = cacheKey(feature: feature, game: game)
 
@@ -157,40 +201,32 @@ enum FFCheatManifest {
         }
         _lock.unlock()
 
-        let path = contentsAPIPath(feature: feature, game: game)
-        guard let url = URL(string: "\(apiBase)/\(path)") else {
-            throw FFCheatError.fileUnavailable
-        }
+        let paths  = try await fetchTree()
+        let folder = repoPath(feature: feature, game: game)   // e.g. "AIM/AimBody"
+        let prefix = feature.filePrefix                        // "cache_res" or "shaders"
 
-        var req = URLRequest(url: url)
-        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        req.timeoutInterval = 12
-
-        let (data, response) = try await URLSession.shared.data(for: req)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-            throw FFCheatError.fileUnavailable
-        }
-
-        struct GHEntry: Decodable { let name: String; let type: String }
-        let entries = try JSONDecoder().decode([GHEntry].self, from: data)
-
-        let prefix = feature.filePrefix
-        guard let match = entries.first(where: { $0.type == "file" && $0.name.hasPrefix(prefix) }) else {
+        // Cari path yang dalam folder betul DAN nama fail bermula dengan prefix
+        guard let match = paths.first(where: { path in
+            path.hasPrefix(folder + "/") &&
+            (path as NSString).lastPathComponent.hasPrefix(prefix)
+        }) else {
             throw FFCheatError.targetFileMissing
         }
 
+        let fileName = (match as NSString).lastPathComponent
+
         _lock.lock()
-        _nameCache[key] = match.name
+        _nameCache[key] = fileName
         _lock.unlock()
 
-        return match.name
+        return fileName
     }
 
     // MARK: - Download
 
     static func download(feature: FFFeature, game: FFGame) async throws -> (data: Data, fileName: String) {
         let name = try await resolveFileName(feature: feature, game: game)
-        let path = contentsAPIPath(feature: feature, game: game)
+        let path = repoPath(feature: feature, game: game)
         guard let url = URL(string: "\(rawBase)/\(path)/\(name)") else {
             throw FFCheatError.fileUnavailable
         }
@@ -208,7 +244,7 @@ enum FFCheatManifest {
     static func checkAvailability(feature: FFFeature, game: FFGame) async -> Bool {
         do {
             let name = try await resolveFileName(feature: feature, game: game)
-            let path = contentsAPIPath(feature: feature, game: game)
+            let path = repoPath(feature: feature, game: game)
             guard let url = URL(string: "\(rawBase)/\(path)/\(name)") else { return false }
             var req = URLRequest(url: url)
             req.httpMethod = "HEAD"
