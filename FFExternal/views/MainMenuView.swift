@@ -123,6 +123,9 @@ struct MainMenuView: View {
             refreshCountdown()
         }
         .task { await loadStatus() }
+        .onChange(of: selectedTab) { tab in
+            if tab == 0 { Task { await loadStatus() } }
+        }
         .onReceive(timer) { _ in
             refreshCountdown()
             if let exp = licenseInfo.expiryDate, exp < Date() { onLogout() }
@@ -132,6 +135,7 @@ struct MainMenuView: View {
                 Task {
                     let still = await LicenseService.revalidateBackground(key: licenseInfo.key)
                     if !still { await MainActor.run { onLogout() } }
+                    await loadStatus()
                 }
             }
         }
